@@ -1,9 +1,106 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# One literal scan decides everything below.
+#
+# * `deepseek=true` only when the native --model/-m selector is exactly
+#   deepseek-flash. Scanning stops at the first `--`, and values of other
+#   options are skipped, so prompt text or an unrelated option value cannot
+#   switch the provider.
+# * `subcommand` is the first positional token (resume, fork, exec, ... or the
+#   optional initial prompt).
+# * `bypass_picker=true` when the caller supplied connection settings the
+#   picker must not override (--remote, --oss/--local-provider, --profile).
+#
+# No eval: every argument is forwarded literally.
+deepseek=false
+bypass_picker=false
+subcommand=""
+remaining=("$@")
+while ((${#remaining[@]})); do
+    argument=${remaining[0]}
+    remaining=("${remaining[@]:1}")
+    case "$argument" in
+        --) break ;;
+        --model|-m)
+            if ((${#remaining[@]})); then
+                if [[ ${remaining[0]} == deepseek-flash ]]; then deepseek=true; fi
+                remaining=("${remaining[@]:1}")
+            fi
+            ;;
+        --model=*) if [[ ${argument#--model=} == deepseek-flash ]]; then deepseek=true; fi ;;
+        -m=*) if [[ ${argument#-m=} == deepseek-flash ]]; then deepseek=true; fi ;;
+        -m?*) if [[ ${argument#-m} == deepseek-flash ]]; then deepseek=true; fi ;;
+        --oss) bypass_picker=true ;;
+        --remote|--local-provider|--profile|-p)
+            bypass_picker=true
+            if ((${#remaining[@]})); then remaining=("${remaining[@]:1}"); fi
+            ;;
+        --remote=*|--local-provider=*|--profile=*|-p=*|-p?*) bypass_picker=true ;;
+        -c|--config|-i|--image|-s|--sandbox|-a|--ask-for-approval|-C|--cd|\
+--add-dir|--remote-auth-token-env|--enable|--disable|\
+--thread-source|-o|--output-last-message|--output-schema|--color)
+            if ((${#remaining[@]})); then remaining=("${remaining[@]:1}"); fi
+            ;;
+        -h|--help|-V|--version) bypass_picker=true ;;
+        *)
+            if [[ -z $subcommand && $argument != -* ]]; then subcommand=$argument; fi
+            ;;
+    esac
+done
+
+# The model picker owns the default local TUI (plain `codex_ds`, an initial
+# prompt) and the resume/fork pickers. Non-interactive subcommands, --help and
+# --version keep native Codex behavior, and a real terminal is required because
+# the picker drives the interactive app-server bridge.
+picker_candidate=false
+if [[ -t 0 && -t 1 ]]; then
+    picker_candidate=true
+    if [[ -n $subcommand ]]; then
+        for native_command in exec e review login logout mcp plugin app-server remote-control \
+            completion update doctor sandbox debug apply a queue archive delete \
+            migrate-rollouts unarchive cloud exec-server features agents help version; do
+            if [[ $subcommand == "$native_command" ]]; then picker_candidate=false; break; fi
+        done
+    fi
+fi
+
 runner=()
 if command -v aa-exec >/dev/null && aa-exec -p codex-flash-worker -- /usr/bin/true 2>/dev/null; then
     runner=(aa-exec -p codex-flash-worker --)
+fi
+
+if [[ $picker_candidate == true && $bypass_picker == false ]]; then
+    picker="$HOME/.codex-ds/model-picker.py"
+    if [[ ! -f $picker ]]; then
+        printf 'codex_ds: %s not found; run the setup installer.\n' "$picker" >&2
+        exit 2
+    fi
+    exec env CODEX_HOME="$HOME/.codex" "${runner[@]}" python3 "$picker" "$@"
+fi
+
+if [[ $deepseek == true ]]; then
+    if [[ -z ${DEEPSEEK_API_KEY:-} ]]; then
+        printf '%s\n' \
+            'codex_ds: DEEPSEEK_API_KEY is not exported. Export it in this shell before launching deepseek-flash; the key is never printed.' >&2
+        exit 2
+    fi
+    # Same provider/catalog overrides as flash-agent, but on the normal ~/.codex
+    # home so AGENTS policy, sessions, and approval/sandbox defaults are kept.
+    exec env -u OPENAI_API_KEY -u CODEX_API_KEY -u OPENAI_BASE_URL \
+        CODEX_HOME="$HOME/.codex" \
+        "${runner[@]}" codex \
+        -c 'model_provider="deepseek"' \
+        -c 'model_providers.deepseek.name="DeepSeek"' \
+        -c 'model_providers.deepseek.base_url="https://api.deepseek.com/"' \
+        -c 'model_providers.deepseek.wire_api="responses"' \
+        -c 'model_providers.deepseek.env_key="DEEPSEEK_API_KEY"' \
+        -c 'model_providers.deepseek.requires_openai_auth=false' \
+        -c "model_catalog_json=\"$HOME/.codex-ds/models.json\"" \
+        -c 'model_reasoning_effort="high"' \
+        -c 'plan_mode_reasoning_effort="high"' \
+        -c 'web_search="disabled"' \
+        "$@"
 fi
 
 exec env CODEX_HOME="$HOME/.codex" "${runner[@]}" codex "$@"

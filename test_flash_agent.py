@@ -2,10 +2,13 @@
 """Offline regression check: argument safety, isolation, failures, and backup preservation."""
 import json
 import os
+import pty
+import shutil
 import subprocess
 import tempfile
 import time
 import signal
+import importlib.util
 from pathlib import Path
 
 root = Path(__file__).resolve().parent
@@ -196,6 +199,164 @@ os.execv("/usr/bin/cp", ["cp", *sys.argv[1:]])
     native_data = json.loads(native.stdout)
     assert native_data["args"] == ["--model", "gpt-5.6-sol"] and native_data["key_present"]
 
+    # Direct DeepSeek supervisor: picked at launch, normal home/state kept, env scrubbed.
+    ds_home = str(Path.home() / ".codex")
+    ds_catalog = str(Path.home() / ".codex-ds" / "models.json")
+    ds_overrides = ['model_provider="deepseek"',
+                    'model_providers.deepseek.name="DeepSeek"',
+                    'model_providers.deepseek.base_url="https://api.deepseek.com/"',
+                    'model_providers.deepseek.wire_api="responses"',
+                    'model_providers.deepseek.env_key="DEEPSEEK_API_KEY"',
+                    'model_providers.deepseek.requires_openai_auth=false',
+                    f'model_catalog_json="{ds_catalog}"',
+                    'model_reasoning_effort="high"',
+                    'plan_mode_reasoning_effort="high"',
+                    'web_search="disabled"']
+    ds_args = [token for value in ds_overrides for token in ("-c", value)]
+
+    def run_launcher(arguments, extra_env=None):
+        return subprocess.run(["bash", str(root / "codex_ds"), *arguments], cwd=temp,
+                              env=dict(env, **(extra_env or {})), capture_output=True, text=True)
+
+    # Every documented selector spelling routes; the rest of the command line stays literal.
+    for selector in (["--model", "deepseek-flash"], ["-m", "deepseek-flash"],
+                     ["--model=deepseek-flash"], ["-m=deepseek-flash"], ["-mdeepseek-flash"]):
+        arguments = [*selector, "exec", "--json", "--", task]
+        routed = run_launcher(arguments)
+        assert routed.returncode == 17, routed.stderr
+        routed_data = json.loads(routed.stdout)
+        assert routed_data["args"] == ds_args + arguments, routed_data["args"]
+        assert routed_data["codex_home"] == ds_home
+        assert routed_data["key_present"] and not routed_data["openai_key_present"]
+        assert not routed_data["codex_key_present"] and routed_data["apparmor"]
+    assert not (temp / "SHOULD_NOT_EXIST").exists() and not (temp / "ALSO_NOT_EXIST").exists()
+    # Native interactive, exec, and resume shapes are all supported.
+    for arguments in (["exec", "--model", "deepseek-flash", "--json", "--", "Task"],
+                      ["exec", "-c", "model=ignored", "--model", "deepseek-flash", "--json", "--", "Task"],
+                      ["--model", "deepseek-flash", "resume", "--last"],
+                      ["exec", "resume", "--last", "-m", "deepseek-flash"]):
+        routed = run_launcher(arguments)
+        assert routed.returncode == 17, routed.stderr
+        routed_data = json.loads(routed.stdout)
+        assert routed_data["args"] == ds_args + arguments and routed_data["key_present"]
+        assert routed_data["codex_home"] == ds_home
+    # Only a real selector routes: option values and text after `--` must stay on GPT.
+    for arguments in (["exec", "--json", "--", "--model deepseek-flash"],
+                      ["exec", "--profile", "deepseek-flash", "--json", "--", "Task"],
+                      ["--profile", "deepseek-flash", "--model", "gpt-5.6-sol"],
+                      ["-c", "model=deepseek-flash", "exec", "Task"],
+                      ["exec", "--json", "--", "-m", "deepseek-flash"]):
+        plain = run_launcher(arguments)
+        assert plain.returncode == 17, plain.stderr
+        plain_data = json.loads(plain.stdout)
+        assert plain_data["args"] == arguments and plain_data["codex_home"] == ds_home
+        assert plain_data["openai_key_present"] and plain_data["codex_key_present"]
+    # The DeepSeek route must refuse to launch without the exported key.
+    calls = temp / "direct-ds-calls"
+    without_key = dict(env, FLASH_STUB_CALLS=str(calls))
+    without_key.pop("DEEPSEEK_API_KEY")
+    missing_key = subprocess.run(["bash", str(root / "codex_ds"), "--model", "deepseek-flash"],
+                                 cwd=temp, env=without_key, capture_output=True, text=True)
+    assert missing_key.returncode == 2
+    assert "DEEPSEEK_API_KEY" in missing_key.stderr and not missing_key.stdout
+    assert env["DEEPSEEK_API_KEY"] not in missing_key.stderr and not calls.exists()
+
+    # Interactive/default launches hand off to the sibling model picker with a
+    # real terminal, literal arguments, the normal ~/.codex home, and the same
+    # optional AppArmor runner. The sibling's model-picker.py may not exist in
+    # this checkout yet, so a local fixture stands in for it here.
+    picker_home = temp / "picker-home"
+    (picker_home / ".codex-ds").mkdir(parents=True)
+    picker_script = picker_home / ".codex-ds" / "model-picker.py"
+    picker_script.write_text('''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+Path(os.environ["FLASH_TEST_PICKER_RECORD"]).write_text(json.dumps({
+    "args": sys.argv[1:],
+    "codex_home": os.environ.get("CODEX_HOME"),
+    "apparmor": os.environ.get("FLASH_TEST_APPARMOR") == "1",
+    "key_present": bool(os.environ.get("DEEPSEEK_API_KEY")),
+    "openai_key_present": "OPENAI_API_KEY" in os.environ}))
+sys.exit(int(os.environ.get("FLASH_TEST_PICKER_EXIT", "0")))
+''')
+    picker_script.chmod(0o755)
+
+    def run_with_tty(arguments, extra_env=None):
+        """Run codex_ds with a real PTY on stdin/stdout and return (code, out, err)."""
+        master, slave = pty.openpty()
+        try:
+            process = subprocess.Popen(["bash", str(root / "codex_ds"), *arguments],
+                                       cwd=temp, env=dict(env, **(extra_env or {})),
+                                       stdin=slave, stdout=slave, stderr=subprocess.PIPE, text=True)
+            os.close(slave)
+            slave = -1
+            output = []
+            while True:
+                try:
+                    chunk = os.read(master, 65536)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                output.append(chunk)
+            stderr = process.stderr.read()
+            returncode = process.wait(timeout=20)
+        finally:
+            if slave != -1:
+                os.close(slave)
+            os.close(master)
+        return returncode, b"".join(output).decode("utf-8", "replace"), stderr
+
+    for index, interactive in enumerate(([], ["resume", "--last"], ["fork", "--last"],
+                                         ["--yolo"], ["--model", "gpt-5.6-sol"],
+                                         ["resume", "--last", "--model", "gpt-5.6-sol"],
+                                         ["an initial prompt", "--no-alt-screen"],
+                                         ["-c", "model=deepseek-flash"],
+                                         ["--", "--model", "deepseek-flash"])):
+        record = temp / f"picker-{index}.json"
+        calls = temp / f"picker-{index}.calls"
+        code, output, stderr = run_with_tty(
+            interactive, {"HOME": str(picker_home), "FLASH_TEST_PICKER_RECORD": str(record),
+                          "FLASH_STUB_CALLS": str(calls)})
+        assert code == 0, (interactive, code, stderr)
+        assert not calls.exists(), interactive
+        picked = json.loads(record.read_text())
+        assert picked["args"] == interactive, picked
+        assert picked["codex_home"] == str(picker_home / ".codex")
+        assert picked["apparmor"] and picked["key_present"] and picked["openai_key_present"]
+        assert not output.strip()
+    # Starting on DeepSeek must still allow switching back through /model.
+    record = temp / "picker-ds.json"
+    code, output, stderr = run_with_tty(["--model", "deepseek-flash"],
+                                        {"HOME": str(picker_home), "FLASH_TEST_PICKER_RECORD": str(record)})
+    assert code == 0, stderr
+    ds_data = json.loads(record.read_text())
+    assert ds_data["args"] == ["--model", "deepseek-flash"]
+    assert ds_data["codex_home"] == str(picker_home / ".codex") and ds_data["apparmor"]
+    assert ds_data["key_present"] and ds_data["openai_key_present"]
+    # User-specified connection config and non-interactive commands bypass the picker.
+    for index, bypass in enumerate((["--remote", "ws://127.0.0.1:1"], ["--remote=ws://127.0.0.1:1"],
+                                    ["--oss"], ["--local-provider", "ollama"],
+                                    ["--local-provider=ollama"], ["--profile", "custom"],
+                                    ["--profile=custom"], ["-p", "custom"], ["-pcustom"],
+                                    ["exec", "--json", "Task"], ["exec", "resume", "--last"],
+                                    ["--help"], ["-V"], ["login"], ["mcp", "list"])):
+        record = temp / f"bypass-{index}.json"
+        code, output, stderr = run_with_tty(
+            bypass, {"HOME": str(picker_home), "FLASH_TEST_PICKER_RECORD": str(record)})
+        assert code == 17, (bypass, code, stderr)
+        assert not record.exists(), bypass
+        bypassed = json.loads(output)
+        assert bypassed["args"] == bypass and bypassed["codex_home"] == str(picker_home / ".codex")
+    # A missing helper must not launch a different interface silently.
+    bare_home = temp / "picker-missing-home"
+    bare_home.mkdir()
+    calls = temp / "fallback.calls"
+    code, output, stderr = run_with_tty(
+        [], {"HOME": str(bare_home), "FLASH_STUB_CALLS": str(calls)})
+    assert code == 2 and not calls.exists() and not output.strip()
+    assert "model-picker.py not found" in stderr
+
     target = temp / "target-home"
     normal = target / ".codex"
     normal.mkdir(parents=True)
@@ -203,7 +364,31 @@ os.execv("/usr/bin/cp", ["cp", *sys.argv[1:]])
     (normal / "AGENTS.md").write_bytes(original)
     (normal / "config.toml").write_bytes(b'model = "existing-model"\n')
     (normal / "auth.json").write_bytes(b'{"test": "unchanged"}\n')
-    install = ["python3", str(root / "install.py"), "--target-home", str(target)]
+    # Install from a copied setup so the sibling-owned picker files can be
+    # stood in for with fixtures without touching their checkout paths.
+    spec = importlib.util.spec_from_file_location("flash_install", root / "install.py")
+    installer = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(installer)
+    assert "model-picker.py" in installer.FILES and "test_model_picker.py" in installer.FILES
+    setup = temp / "setup"
+    setup.mkdir()
+    for name in installer.FILES:
+        if (root / name).exists():
+            shutil.copy2(root / name, setup / name)
+        else:
+            (setup / name).write_text(f"FIXTURE {name}\n")
+    # A missing bundle helper must fail before any file is written.
+    broken = temp / "broken-setup"
+    broken.mkdir()
+    for name in installer.FILES:
+        if name != "model-picker.py":
+            shutil.copy2(setup / name, broken / name)
+    broken_run = subprocess.run(["python3", str(broken / "install.py"),
+                                 "--target-home", str(broken / "home")],
+                                env=env, capture_output=True, text=True)
+    assert broken_run.returncode != 0 and "Missing bundle file" in broken_run.stderr
+    assert not (broken / "home" / ".codex" / "AGENTS.md").exists()
+    install = ["python3", str(setup / "install.py"), "--target-home", str(target)]
     subprocess.run(install, env=env, capture_output=True, text=True, check=True)
     assert (normal / "AGENTS.md").read_bytes().startswith(original)
     backups = list(normal.glob("AGENTS.md.before-flash-*"))
@@ -217,6 +402,28 @@ os.execv("/usr/bin/cp", ["cp", *sys.argv[1:]])
     assert os.access(target / ".local/bin/flash-agent", os.X_OK)
     assert os.access(target / ".local/bin/codex_ds", os.X_OK)
     assert not (target / ".codex-ds/auth.json").exists()
+    # The new picker helper and its offline check ship in the portable bundle.
+    assert (target / ".codex-ds/model-picker.py").read_bytes() == (setup / "model-picker.py").read_bytes()
+    assert os.access(target / ".codex-ds/model-picker.py", os.X_OK)
+    assert (target / ".codex-ds/test_model_picker.py").read_bytes() == (setup / "test_model_picker.py").read_bytes()
+    assert not os.access(target / ".codex-ds/test_model_picker.py", os.X_OK)
+    assert not (target / ".local/bin/model-picker.py").exists()
+    assert not (target / ".local/bin/test_model_picker.py").exists()
+    # The installer must copy the changed launcher, and the installed copy must route.
+    launcher = (root / "codex_ds").read_bytes()
+    assert (target / ".codex-ds/codex_ds").read_bytes() == launcher
+    assert (target / ".local/bin/codex_ds").read_bytes() == launcher
+    installed = subprocess.run(["bash", str(target / ".local/bin/codex_ds"),
+                                "--model", "deepseek-flash"],
+                               cwd=temp, env=dict(env, HOME=str(target)),
+                               capture_output=True, text=True)
+    assert installed.returncode == 17, installed.stderr
+    installed_data = json.loads(installed.stdout)
+    assert installed_data["codex_home"] == str(target / ".codex")
+    assert installed_data["args"][-2:] == ["--model", "deepseek-flash"]
+    assert f'model_catalog_json="{target}/.codex-ds/models.json"' in installed_data["args"]
+    assert 'model_provider="deepseek"' in installed_data["args"]
+    assert installed_data["key_present"] and not installed_data["openai_key_present"]
     # Upgrade only our delimited policy; retain surrounding user text and back up the old file.
     old = (original + b"\n<!-- BEGIN DEEPSEEK FLASH WORKERS -->\nOld policy\n"
            b"<!-- END DEEPSEEK FLASH WORKERS -->\nUser instructions after the block.")
