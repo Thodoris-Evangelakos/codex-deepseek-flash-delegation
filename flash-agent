@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+    printf '%s\n' 'Usage: flash-agent [--read-only] [--json] [--output FILE] [--] "TASK"' \
+        'Use TASK - to read from stdin. Default: workspace-write sandbox, caller working directory.'
+}
+
+sandbox=workspace-write
+options=()
+output_file=
+while (($#)); do
+    case "$1" in
+        --read-only) sandbox=read-only; shift ;;
+        --json) options+=(--json); shift ;;
+        --output)
+            if (($# < 2)) || [[ -z "$2" ]]; then usage >&2; exit 2; fi
+            output_file=$2; shift 2 ;;
+        --help|-h) usage; exit 0 ;;
+        --) shift; break ;;
+        -) break ;;
+        -*) usage >&2; exit 2 ;;
+        *) break ;;
+    esac
+done
+if (($# != 1)) || [[ -z "$1" ]]; then usage >&2; exit 2; fi
+if [[ -z "${DEEPSEEK_API_KEY:-}" ]]; then
+    printf '%s\n' 'flash-agent: DEEPSEEK_API_KEY is not exported; enter it securely in your shell first.' >&2
+    exit 2
+fi
+
+runner=()
+if command -v aa-exec >/dev/null && aa-exec -p codex-flash-worker -- /usr/bin/true 2>/dev/null; then
+    runner=(aa-exec -p codex-flash-worker --)
+fi
+
+result_dir=$(mktemp -d "${TMPDIR:-/tmp}/flash-result.XXXXXXXX")
+final_file="$result_dir/final-answer"
+trap 'rm -rf -- "$result_dir"' EXIT
+stop_worker() {
+    trap - INT TERM
+    kill -TERM "$worker_pid" 2>/dev/null || true
+    wait "$worker_pid" 2>/dev/null || true
+    exit "$1"
+}
+
+env -u CODEX_API_KEY -u OPENAI_API_KEY -u OPENAI_BASE_URL \
+    CODEX_HOME="$HOME/.codex-ds" \
+    "${runner[@]}" codex --strict-config --ask-for-approval never exec \
+    --ephemeral --skip-git-repo-check --color never --sandbox "$sandbox" \
+    --add-dir "$result_dir" \
+    --model deepseek-flash \
+    -c 'model_provider="deepseek"' \
+    -c 'model_providers.deepseek.base_url="https://api.deepseek.com/"' \
+    -c 'model_providers.deepseek.wire_api="responses"' \
+    -c 'model_providers.deepseek.env_key="DEEPSEEK_API_KEY"' \
+    -c 'model_providers.deepseek.requires_openai_auth=false' \
+    -c "model_catalog_json=\"$HOME/.codex-ds/models.json\"" \
+    --output-last-message "$final_file" "${options[@]}" -- "$1" <&0 &
+worker_pid=$!
+trap 'stop_worker 130' INT
+trap 'stop_worker 143' TERM
+status=0
+wait "$worker_pid" || status=$?
+trap - INT TERM
+if ((status)); then exit "$status"; fi
+
+if ! python3 -c 'from pathlib import Path; import sys; p = Path(sys.argv[1]); sys.exit(0 if p.is_file() and p.read_text().strip() else 1)' "$final_file"; then
+    printf '%s\n' 'FLASH_EMPTY_RESPONSE: DeepSeek returned no final answer. Block the current task/goal and notify the user. Do not retry or fall back automatically; partial edits may exist.' >&2
+    exit 70
+fi
+if [[ -n "$output_file" ]]; then cp -- "$final_file" "$output_file"; fi

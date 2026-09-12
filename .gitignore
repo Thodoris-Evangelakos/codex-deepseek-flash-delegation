@@ -1,0 +1,18 @@
+# Codex runtime state and local machine metadata
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+installation_id
+.sandbox_migration
+version.json
+created-files.txt
+smoke-result.json
+
+# Temporary, generated, and local-only files
+skills/
+.tmp/
+tmp/
+thread-writer-locks/
+__pycache__/
+*.py[cod]
+flash-agent-setup*.tar.gz

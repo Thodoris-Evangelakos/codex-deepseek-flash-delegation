@@ -1,0 +1,7 @@
+# Opt-in profile: enter with aa-exec -p codex-flash-worker -- COMMAND.
+# No executable attachment: ordinary Codex launches are unaffected.
+# Codex still enforces its own workspace/read-only filesystem sandbox.
+abi <abi/4.0>,
+profile codex-flash-worker flags=(unconfined) {
+    userns,
+}

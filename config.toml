@@ -1,0 +1,28 @@
+# DeepSeek V4.1 Flash; metadata checked against official docs on 2026-09-11.
+model = "deepseek-flash"
+model_provider = "deepseek"
+model_catalog_json = "models.json"
+model_reasoning_effort = "high"
+approval_policy = "never"
+sandbox_mode = "workspace-write"
+web_search = "disabled"
+
+[model_providers.deepseek]
+name = "DeepSeek"
+base_url = "https://api.deepseek.com/"
+wire_api = "responses"
+env_key = "DEEPSEEK_API_KEY"
+requires_openai_auth = false
+
+[features]
+multi_agent = false
+shell_snapshot = false
+
+[shell_environment_policy]
+ignore_default_excludes = false
+
+[shell_environment_policy.filters]
+DEEPSEEK_API_KEY = "exclude"
+
+[sandbox_workspace_write]
+network_access = true

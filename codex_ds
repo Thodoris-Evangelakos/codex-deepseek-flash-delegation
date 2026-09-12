@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+runner=()
+if command -v aa-exec >/dev/null && aa-exec -p codex-flash-worker -- /usr/bin/true 2>/dev/null; then
+    runner=(aa-exec -p codex-flash-worker --)
+fi
+
+exec env CODEX_HOME="$HOME/.codex" "${runner[@]}" codex "$@"
