@@ -34,9 +34,20 @@ if command -v aa-exec >/dev/null && aa-exec -p codex-flash-worker -- /usr/bin/tr
     runner=(aa-exec -p codex-flash-worker --)
 fi
 
-result_dir=$(mktemp -d "${TMPDIR:-/tmp}/flash-result.XXXXXXXX")
+if ! result_dir=$(mktemp -d "${TMPDIR:-/tmp}/flash-result.XXXXXXXX"); then
+    printf '%s\n' 'FLASH_OUTPUT_ERROR: Cannot create the result directory. Check TMPDIR and the launching process filesystem permissions; no worker was started.' >&2
+    exit 73
+fi
 final_file="$result_dir/final-answer"
-trap 'rm -rf -- "$result_dir"' EXIT
+output_stage=
+trap 'rm -rf -- "$result_dir"; if [[ -n "$output_stage" ]]; then rm -f -- "$output_stage"; fi' EXIT
+if [[ -n "$output_file" ]]; then
+    if [[ -L "$output_file" || ( -e "$output_file" && ! -f "$output_file" ) ]] ||
+       ! output_stage=$(mktemp -- "$(dirname -- "$output_file")/.flash-output.XXXXXXXX"); then
+        printf '%s\n' 'FLASH_OUTPUT_ERROR: --output needs a regular file destination in a writable directory; no worker was started.' >&2
+        exit 73
+    fi
+fi
 stop_worker() {
     trap - INT TERM
     kill -TERM "$worker_pid" 2>/dev/null || true
@@ -69,4 +80,9 @@ if ! python3 -c 'from pathlib import Path; import sys; p = Path(sys.argv[1]); sy
     printf '%s\n' 'FLASH_EMPTY_RESPONSE: DeepSeek returned no final answer. Block the current task/goal and notify the user. Do not retry or fall back automatically; partial edits may exist.' >&2
     exit 70
 fi
-if [[ -n "$output_file" ]]; then cp -- "$final_file" "$output_file"; fi
+if [[ -n "$output_file" ]]; then
+    if ! cp -- "$final_file" "$output_stage" || ! mv -fT -- "$output_stage" "$output_file"; then
+        printf '%s\n' 'FLASH_OUTPUT_ERROR: Could not save the final answer to --output; the answer is still in stdout.' >&2
+        exit 73
+    fi
+fi

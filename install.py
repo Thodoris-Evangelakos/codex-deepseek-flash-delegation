@@ -8,7 +8,7 @@ from pathlib import Path
 
 FILES = ("config.toml", "models.json", "AGENTS.md", "flash-agent", "astra-delegation.md",
          "install.py", "test_flash_agent.py", "smoke-test.py", "README.md",
-         "codex-flash-worker.apparmor", "codex_ds")
+         "codex-flash-worker.apparmor", "codex_ds", "test_flash_sandbox.py")
 
 
 def install(target_home):

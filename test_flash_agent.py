@@ -50,6 +50,16 @@ os.environ["FLASH_TEST_APPARMOR"] = "1"
 os.execvp(sys.argv[4], sys.argv[4:])
 ''')
     apparmor.chmod(0o755)
+    copy = temp / "cp"
+    copy.write_text('''#!/usr/bin/env python3
+import os, sys
+from pathlib import Path
+if os.environ.get("FLASH_TEST_COPY_FAIL"):
+    Path(sys.argv[-1]).write_text("PARTIAL_COPY")
+    sys.exit(1)
+os.execv("/usr/bin/cp", ["cp", *sys.argv[1:]])
+''')
+    copy.chmod(0o755)
     env = dict(os.environ, PATH=str(temp) + os.pathsep + os.environ["PATH"],
                DEEPSEEK_API_KEY="test-only-placeholder", OPENAI_API_KEY="test-openai",
                CODEX_API_KEY="test-codex")
@@ -61,10 +71,10 @@ os.execvp(sys.argv[4], sys.argv[4:])
     args = data["args"]
     assert args[-2:] == ["--", task]
     assert args[args.index("--sandbox") + 1] == "read-only"
-    result_dir = Path(args[args.index("--add-dir") + 1])
+    result_dir = Path(args[args.index("--output-last-message") + 1]).parent
     assert result_dir.parent == Path(tempfile.gettempdir())
     assert result_dir.name.startswith("flash-result.")
-    assert Path(args[args.index("--output-last-message") + 1]).parent == result_dir
+    assert args[args.index("--add-dir") + 1] == str(result_dir)
     assert args[args.index("--model") + 1] == "deepseek-flash"
     assert args[args.index("--ask-for-approval") + 1] == "never"
     assert 'model_provider="deepseek"' in args
@@ -76,6 +86,32 @@ os.execvp(sys.argv[4], sys.argv[4:])
     assert (temp / "report with spaces.txt").read_text() == "STUB_OK\n"
     assert not Path(args[args.index("--output-last-message") + 1]).exists()
     assert not (temp / "SHOULD_NOT_EXIST").exists() and not (temp / "ALSO_NOT_EXIST").exists()
+    # Invalid report destinations must fail before spending API tokens.
+    link = temp / "report-link"
+    link.symlink_to(temp / "report with spaces.txt")
+    fifo = temp / "report-fifo"
+    os.mkfifo(fifo)
+    for destination in (temp, temp / "missing-parent" / "report.txt", link, fifo):
+        calls = temp / "invalid-output-calls"
+        invalid_output = subprocess.run(
+            ["bash", str(root / "flash-agent"), "--output", str(destination), "Task"],
+            env=dict(env, FLASH_STUB_CALLS=str(calls)), capture_output=True, text=True)
+        assert invalid_output.returncode == 73, invalid_output
+        assert "FLASH_OUTPUT_ERROR" in invalid_output.stderr
+        assert not calls.exists()
+    unavailable_temp = subprocess.run(["bash", str(root / "flash-agent"), "Task"],
+                                     env=dict(env, TMPDIR=str(temp / "missing-tmp")),
+                                     capture_output=True, text=True)
+    assert unavailable_temp.returncode == 73
+    assert "FLASH_OUTPUT_ERROR" in unavailable_temp.stderr and not unavailable_temp.stdout
+    previous = temp / "previous-result.txt"
+    previous.write_text("PREVIOUS_RESULT")
+    failed_copy = subprocess.run(
+        ["bash", str(root / "flash-agent"), "--output", str(previous), "Task"],
+        env=dict(env, FLASH_TEST_COPY_FAIL="1"), capture_output=True, text=True)
+    assert failed_copy.returncode == 73 and "FLASH_OUTPUT_ERROR" in failed_copy.stderr
+    assert previous.read_text() == "PREVIOUS_RESULT"
+    assert not list(temp.glob(".flash-output.*"))
     result = subprocess.run(["bash", str(root / "flash-agent"), "Implement delegated test."],
                             env=env, capture_output=True, text=True, check=True)
     args = json.loads(result.stdout)["args"]
@@ -102,6 +138,12 @@ os.execvp(sys.argv[4], sys.argv[4:])
         assert calls.read_text() == "call\n"
         args = json.loads(empty.stdout)["args"]
         assert not Path(args[args.index("--output-last-message") + 1]).exists()
+        assert not list(temp.glob(".flash-output.*"))
+    smoke_empty = subprocess.run(["python3", str(root / "smoke-test.py")],
+                                 env=dict(env, FLASH_STUB_NO_FINAL="1"),
+                                 capture_output=True, text=True)
+    assert smoke_empty.returncode == 70, smoke_empty
+    assert json.loads(smoke_empty.stdout)["empty_response"] is True
     # Cancelling the wrapper must stop its child rather than leave a billable worker running.
     ready = temp / "worker-ready"
     process = subprocess.Popen(["bash", str(root / "flash-agent"), "Task"],
