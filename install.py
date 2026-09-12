@@ -2,21 +2,17 @@
 """Install the reviewed bundle; preserve normal Codex config and authentication."""
 import argparse
 import datetime
-import importlib.util
 import shutil
 import subprocess
 from pathlib import Path
 
 FILES = ("config.toml", "models.json", "AGENTS.md", "flash-agent", "astra-delegation.md",
          "install.py", "test_flash_agent.py", "smoke-test.py", "README.md",
-         "codex-flash-worker.apparmor", "codex_ds", "test_flash_sandbox.py",
-         "model-picker.py", "test_model_picker.py")
-EXECUTABLE = ("flash-agent", "codex_ds", "model-picker.py")
+         "codex-flash-worker.apparmor", "codex_ds", "test_flash_sandbox.py")
+EXECUTABLE = ("flash-agent", "codex_ds")
 
 
 def install(target_home):
-    if importlib.util.find_spec("aiohttp") is None:
-        raise SystemExit("The native /model bridge requires aiohttp in the launching Python environment.")
     source = Path(__file__).resolve().parent
     worker = target_home / ".codex-ds"
     normal = target_home / ".codex"

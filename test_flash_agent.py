@@ -218,6 +218,13 @@ os.execv("/usr/bin/cp", ["cp", *sys.argv[1:]])
         return subprocess.run(["bash", str(root / "codex_ds"), *arguments], cwd=temp,
                               env=dict(env, **(extra_env or {})), capture_output=True, text=True)
 
+    # The launcher's own help carries the Flash resume recipes.
+    helped = run_launcher(["--help"])
+    assert helped.returncode == 17, helped.stderr
+    for recipe in ("resume --last", "resume <session-id>",
+                   "codex_ds --model deepseek-flash resume"):
+        assert recipe in helped.stdout, helped.stdout
+
     # Every documented selector spelling routes; the rest of the command line stays literal.
     for selector in (["--model", "deepseek-flash"], ["-m", "deepseek-flash"],
                      ["--model=deepseek-flash"], ["-m=deepseek-flash"], ["-mdeepseek-flash"]):
@@ -261,33 +268,17 @@ os.execv("/usr/bin/cp", ["cp", *sys.argv[1:]])
     assert "DEEPSEEK_API_KEY" in missing_key.stderr and not missing_key.stdout
     assert env["DEEPSEEK_API_KEY"] not in missing_key.stderr and not calls.exists()
 
-    # Interactive/default launches hand off to the sibling model picker with a
-    # real terminal, literal arguments, the normal ~/.codex home, and the same
-    # optional AppArmor runner. The sibling's model-picker.py may not exist in
-    # this checkout yet, so a local fixture stands in for it here.
-    picker_home = temp / "picker-home"
-    (picker_home / ".codex-ds").mkdir(parents=True)
-    picker_script = picker_home / ".codex-ds" / "model-picker.py"
-    picker_script.write_text('''#!/usr/bin/env python3
-import json, os, sys
-from pathlib import Path
-Path(os.environ["FLASH_TEST_PICKER_RECORD"]).write_text(json.dumps({
-    "args": sys.argv[1:],
-    "codex_home": os.environ.get("CODEX_HOME"),
-    "apparmor": os.environ.get("FLASH_TEST_APPARMOR") == "1",
-    "key_present": bool(os.environ.get("DEEPSEEK_API_KEY")),
-    "openai_key_present": "OPENAI_API_KEY" in os.environ}))
-sys.exit(int(os.environ.get("FLASH_TEST_PICKER_EXIT", "0")))
-''')
-    picker_script.chmod(0o755)
-
-    def run_with_tty(arguments, extra_env=None):
+    # Interactive launches go straight to the installed Codex CLI with a real
+    # terminal, literal arguments, the normal ~/.codex home, and the same
+    # optional AppArmor runner. Nothing proxies the TUI, so native behavior such
+    # as the /resume session picker keeps working.
+    def run_with_tty(arguments):
         """Run codex_ds with a real PTY on stdin/stdout and return (code, out, err)."""
         master, slave = pty.openpty()
         try:
             process = subprocess.Popen(["bash", str(root / "codex_ds"), *arguments],
-                                       cwd=temp, env=dict(env, **(extra_env or {})),
-                                       stdin=slave, stdout=slave, stderr=subprocess.PIPE, text=True)
+                                       cwd=temp, env=env, stdin=slave, stdout=slave,
+                                       stderr=subprocess.PIPE, text=True)
             os.close(slave)
             slave = -1
             output = []
@@ -307,55 +298,27 @@ sys.exit(int(os.environ.get("FLASH_TEST_PICKER_EXIT", "0")))
             os.close(master)
         return returncode, b"".join(output).decode("utf-8", "replace"), stderr
 
-    for index, interactive in enumerate(([], ["resume", "--last"], ["fork", "--last"],
-                                         ["--yolo"], ["--model", "gpt-5.6-sol"],
-                                         ["resume", "--last", "--model", "gpt-5.6-sol"],
-                                         ["an initial prompt", "--no-alt-screen"],
-                                         ["-c", "model=deepseek-flash"],
-                                         ["--", "--model", "deepseek-flash"])):
-        record = temp / f"picker-{index}.json"
-        calls = temp / f"picker-{index}.calls"
-        code, output, stderr = run_with_tty(
-            interactive, {"HOME": str(picker_home), "FLASH_TEST_PICKER_RECORD": str(record),
-                          "FLASH_STUB_CALLS": str(calls)})
-        assert code == 0, (interactive, code, stderr)
-        assert not calls.exists(), interactive
-        picked = json.loads(record.read_text())
-        assert picked["args"] == interactive, picked
-        assert picked["codex_home"] == str(picker_home / ".codex")
-        assert picked["apparmor"] and picked["key_present"] and picked["openai_key_present"]
-        assert not output.strip()
-    # Starting on DeepSeek must still allow switching back through /model.
-    record = temp / "picker-ds.json"
-    code, output, stderr = run_with_tty(["--model", "deepseek-flash"],
-                                        {"HOME": str(picker_home), "FLASH_TEST_PICKER_RECORD": str(record)})
-    assert code == 0, stderr
-    ds_data = json.loads(record.read_text())
-    assert ds_data["args"] == ["--model", "deepseek-flash"]
-    assert ds_data["codex_home"] == str(picker_home / ".codex") and ds_data["apparmor"]
-    assert ds_data["key_present"] and ds_data["openai_key_present"]
-    # User-specified connection config and non-interactive commands bypass the picker.
-    for index, bypass in enumerate((["--remote", "ws://127.0.0.1:1"], ["--remote=ws://127.0.0.1:1"],
-                                    ["--oss"], ["--local-provider", "ollama"],
-                                    ["--local-provider=ollama"], ["--profile", "custom"],
-                                    ["--profile=custom"], ["-p", "custom"], ["-pcustom"],
-                                    ["exec", "--json", "Task"], ["exec", "resume", "--last"],
-                                    ["--help"], ["-V"], ["login"], ["mcp", "list"])):
-        record = temp / f"bypass-{index}.json"
-        code, output, stderr = run_with_tty(
-            bypass, {"HOME": str(picker_home), "FLASH_TEST_PICKER_RECORD": str(record)})
-        assert code == 17, (bypass, code, stderr)
-        assert not record.exists(), bypass
-        bypassed = json.loads(output)
-        assert bypassed["args"] == bypass and bypassed["codex_home"] == str(picker_home / ".codex")
-    # A missing helper must not launch a different interface silently.
-    bare_home = temp / "picker-missing-home"
-    bare_home.mkdir()
-    calls = temp / "fallback.calls"
-    code, output, stderr = run_with_tty(
-        [], {"HOME": str(bare_home), "FLASH_STUB_CALLS": str(calls)})
-    assert code == 2 and not calls.exists() and not output.strip()
-    assert "model-picker.py not found" in stderr
+    def tty_launch(arguments):
+        code, output, stderr = run_with_tty(arguments)
+        assert code == 17, (arguments, code, stderr)
+        payload = next(line for line in output.splitlines() if line.startswith("{"))
+        return json.loads(payload)
+
+    for interactive in ([], ["resume", "--last"], ["fork", "--last"], ["--yolo"],
+                        ["--model", "gpt-5.6-sol"],
+                        ["resume", "--last", "--model", "gpt-5.6-sol"],
+                        ["an initial prompt", "--no-alt-screen"],
+                        ["-c", "model=deepseek-flash"],
+                        ["--", "--model", "deepseek-flash"]):
+        launched = tty_launch(interactive)
+        assert launched["args"] == interactive, launched
+        assert launched["codex_home"] == str(Path.home() / ".codex")
+        assert launched["apparmor"] and launched["openai_key_present"]
+    # Resuming an existing conversation on deepseek-flash keeps the direct route.
+    resumed = tty_launch(["--model", "deepseek-flash", "resume", "--last"])
+    assert resumed["args"] == ds_args + ["--model", "deepseek-flash", "resume", "--last"]
+    assert resumed["codex_home"] == str(Path.home() / ".codex")
+    assert resumed["key_present"] and not resumed["openai_key_present"]
 
     target = temp / "target-home"
     normal = target / ".codex"
@@ -364,12 +327,13 @@ sys.exit(int(os.environ.get("FLASH_TEST_PICKER_EXIT", "0")))
     (normal / "AGENTS.md").write_bytes(original)
     (normal / "config.toml").write_bytes(b'model = "existing-model"\n')
     (normal / "auth.json").write_bytes(b'{"test": "unchanged"}\n')
-    # Install from a copied setup so the sibling-owned picker files can be
-    # stood in for with fixtures without touching their checkout paths.
+    # Install from a copied setup so the bundle is exercised without touching
+    # the live checkout.
     spec = importlib.util.spec_from_file_location("flash_install", root / "install.py")
     installer = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(installer)
-    assert "model-picker.py" in installer.FILES and "test_model_picker.py" in installer.FILES
+    assert "model-picker.py" not in installer.FILES
+    assert "test_model_picker.py" not in installer.FILES
     setup = temp / "setup"
     setup.mkdir()
     for name in installer.FILES:
@@ -381,7 +345,7 @@ sys.exit(int(os.environ.get("FLASH_TEST_PICKER_EXIT", "0")))
     broken = temp / "broken-setup"
     broken.mkdir()
     for name in installer.FILES:
-        if name != "model-picker.py":
+        if name != "config.toml":
             shutil.copy2(setup / name, broken / name)
     broken_run = subprocess.run(["python3", str(broken / "install.py"),
                                  "--target-home", str(broken / "home")],
@@ -402,13 +366,9 @@ sys.exit(int(os.environ.get("FLASH_TEST_PICKER_EXIT", "0")))
     assert os.access(target / ".local/bin/flash-agent", os.X_OK)
     assert os.access(target / ".local/bin/codex_ds", os.X_OK)
     assert not (target / ".codex-ds/auth.json").exists()
-    # The new picker helper and its offline check ship in the portable bundle.
-    assert (target / ".codex-ds/model-picker.py").read_bytes() == (setup / "model-picker.py").read_bytes()
-    assert os.access(target / ".codex-ds/model-picker.py", os.X_OK)
-    assert (target / ".codex-ds/test_model_picker.py").read_bytes() == (setup / "test_model_picker.py").read_bytes()
-    assert not os.access(target / ".codex-ds/test_model_picker.py", os.X_OK)
+    # The portable bundle ships no picker helper; the launcher needs none.
+    assert not (target / ".codex-ds/model-picker.py").exists()
     assert not (target / ".local/bin/model-picker.py").exists()
-    assert not (target / ".local/bin/test_model_picker.py").exists()
     # The installer must copy the changed launcher, and the installed copy must route.
     launcher = (root / "codex_ds").read_bytes()
     assert (target / ".codex-ds/codex_ds").read_bytes() == launcher

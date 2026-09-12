@@ -2,7 +2,6 @@
 
 ```text
 codex_ds -> normal Codex / Astra, Sol, etc. / ChatGPT Plus (~/.codex)
-  then /model -> deepseek-flash (DeepSeek V4.1 Flash) via the native picker bridge (~/.codex)
 codex_ds --model deepseek-flash -> main assistant / DeepSeek V4.1 Flash (~/.codex)
   either supervisor delegates suitable work, verifies, integrates
      |-- flash-agent task A --|
@@ -30,18 +29,26 @@ The export lasts for that shell and its future children. Start `codex_ds` from t
 ## Interactive Codex and native commands
 
 ```bash
-codex_ds                              # then /model -> deepseek-flash (DeepSeek V4.1 Flash)
-codex_ds --model deepseek-flash        # start on DeepSeek; /model can switch back
+codex_ds                              # normal Codex on your configured model
+codex_ds --model deepseek-flash        # start on DeepSeek V4.1 Flash
 codex_ds --model gpt-5.6-sol
-codex_ds resume --last
+codex_ds resume --last                 # native session picker
+codex_ds --model deepseek-flash resume --last
 codex_ds --yolo
 ```
 
-Local interactive sessions offer GPT models and DeepSeek V4.1 Flash in the same `/model` picker. Finish the current turn before changing providers. The adapter uses Codex's native unsubscribe/resume operations, preserves the conversation, and verifies that Codex actually applied the requested provider. It does not proxy API credentials. Python `aiohttp` is required and is already installed on this machine.
+`codex_ds` is a thin launcher: it forwards every argument to the installed Codex CLI unchanged, so native TUI behavior such as the `/resume` session picker, `/fork`, and `/model` keeps working. The only decision it makes is whether `--model deepseek-flash` (also `-m`, `--model=`, or `-mdeepseek-flash`) appears on that command line. The DeepSeek route selects the `deepseek` provider, the local model catalog, `high` reasoning, and disabled hosted web search; every other launch keeps your normal Codex configuration.
 
-Model and reasoning choices are saved in `~/.codex/codex-ds.config.toml`. Your plain Codex defaults in `~/.codex/config.toml` remain separate. Both providers use the normal `~/.codex` supervisor instructions and session storage. GPT models use your existing ChatGPT login; DeepSeek uses the exported `DEEPSEEK_API_KEY` and DeepSeek API billing, independently of ChatGPT usage. The official API name for [V4.1 Flash](https://www.deepseek.com/en/news/deepseek-v4-1-flash/) is `deepseek-flash`.
+Continue an existing GPT conversation on Flash by resuming it behind the model flag. The resumed thread keeps its history and continues on the DeepSeek provider:
 
-The picker applies to local interactive sessions, including `resume` and `fork`. Noninteractive commands, help/version, and explicit `--remote`, `--oss`/`--local-provider`, or `--profile` options retain native CLI behavior. A missing picker helper is an installation error, not a fallback to another interface.
+```bash
+codex_ds --model deepseek-flash resume --last
+codex_ds --model deepseek-flash resume <session-id>
+```
+
+`codex_ds --help` prints these forms, and this machine also has a `dsresume` shell shortcut for them. On another device add `dsresume() { codex_ds --model deepseek-flash resume "$@"; }` to your shell rc.
+
+Both providers use the normal `~/.codex` supervisor instructions, session storage, approval policy, and sandbox settings. GPT models use your existing ChatGPT login; DeepSeek uses the exported `DEEPSEEK_API_KEY` and DeepSeek API billing, independently of ChatGPT usage. Changing the provider mid-conversation means quitting and relaunching with the other model; a DeepSeek session lists only `deepseek-flash` in the `/model` picker. The official API name for [V4.1 Flash](https://www.deepseek.com/en/news/deepseek-v4-1-flash/) is `deepseek-flash`.
 
 Direct noninteractive DeepSeek use also remains available:
 
@@ -54,7 +61,7 @@ The direct route accepts native `--model`/`-m` spellings and forwards arguments 
 
 The standing policy in `~/.codex/AGENTS.md` directs supervisors to delegate before broad repository reading, giving Flash complete bounded reproduce-diagnose-fix-test jobs and small features with explicit acceptance criteria. When independent useful work exists, use two or three workers with disjoint owned files or separate worktrees. Workers report changed files, evidence, commands and exit outcomes, and unresolved issues. The supervisor owns intent, architecture, integration, and final judgment, reviewing critical evidence without repeating the entire investigation. Tiny tasks can stay local.
 
-`flash-agent` runs ephemeral workers in `~/.codex-ds`; Codex's native `spawn_agent` is not redirected to DeepSeek. Plain `codex` also loads the global delegation policy. Export `DEEPSEEK_API_KEY` before starting the supervisor; an already-running app does not inherit a later export. Missing credentials or failed provider switches are reported explicitly. Start a new `codex_ds` process after installing launcher or policy updates.
+`flash-agent` runs ephemeral workers in `~/.codex-ds`; Codex's native `spawn_agent` is not redirected to DeepSeek. Plain `codex` also loads the global delegation policy. Export `DEEPSEEK_API_KEY` before starting the supervisor; an already-running app does not inherit a later export. Missing credentials are reported explicitly. Start a new `codex_ds` process after installing launcher or policy updates.
 
 ## Run workers
 
@@ -91,13 +98,12 @@ Pass: the supervisor launches `flash-agent --read-only` before doing most of the
 
 ```bash
 python3 ~/.codex-ds/test_flash_agent.py
-python3 ~/.codex-ds/test_model_picker.py --native
 python3 ~/.codex-ds/test_flash_sandbox.py
 python3 ~/.codex-ds/smoke-test.py
 python3 ~/.codex-ds/smoke-test.py --workspace-write
 ```
 
-The first two checks are offline and spend no API tokens. `test_flash_agent.py` simulates successful, empty, whitespace-only, and missing answers; verifies exit 70 despite progress output or a stale report; checks that there is exactly one attempt; verifies cancellation stops the child; checks the direct DeepSeek routing (`--model`/`-m` variants and native forms, the `--` prompt boundary, `~/.codex` home and catalog overrides, environment scrubbing, and the missing-key refusal); and drives `codex_ds` on a real pseudo-terminal to confirm the `/model` picker hand-off, literal argument pass-through, picker bypass flags, and the fixture-based portable install. `test_model_picker.py --native` also drives the installed app-server through empty-thread and cold-resume switches, history preservation, and permission checks without starting any model turns. Together they prove the launcher and picker guards, not the supervisor model's obedience. In the behavioral test above, an actual `FLASH_EMPTY_RESPONSE` must make the supervisor report the task as blocked and stop instead of retrying or taking over.
+The first two checks are offline and spend no API tokens. `test_flash_agent.py` simulates successful, empty, whitespace-only, and missing answers; verifies exit 70 despite progress output or a stale report; checks that there is exactly one attempt; verifies cancellation stops the child; checks the direct DeepSeek routing (`--model`/`-m` variants and native forms, `resume` and `exec` shapes, the `--` prompt boundary, `~/.codex` home and catalog overrides, environment scrubbing, and the missing-key refusal); and drives `codex_ds` on a real pseudo-terminal to confirm interactive launches reach the installed CLI with literal arguments, the normal home, and the portable install. Together they prove the launcher guards, not the supervisor model's obedience. In the behavioral test above, an actual `FLASH_EMPTY_RESPONSE` must make the supervisor report the task as blocked and stop instead of retrying or taking over.
 
 `test_flash_sandbox.py` uses the real native sandbox without making API calls. It checks workspace writes, read-only write denial, outside-workspace write denial, and the explicit preflight failure when the launcher inherits a read-only filesystem. Its temporary runtime home keeps the check isolated from normal Codex state.
 
@@ -157,12 +163,12 @@ python3 ~/flash-agent-setup/install.py
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Enter the key using the hidden-input command above, then run the offline and live checks. The installer ships the picker helper and its offline check (`model-picker.py`, `test_model_picker.py`) with the rest of the bundle. It backs up existing files before changes, adds or updates only its delimited delegation section while preserving all surrounding user instructions, and leaves normal config/authentication untouched. Running it again does not duplicate the section. It refuses malformed or duplicate delegation markers before changing files, and it checks for every bundle file before writing anything. No Codex installer, login, key copy, pip install, or normal configuration rewrite occurs, and authentication stores are never inspected. After installing, run `codex_ds` and give it ordinary tasks.
+Enter the key using the hidden-input command above, then run the offline and live checks. The installer copies the launcher, worker, policy, and test files. It backs up existing files before changes, adds or updates only its delimited delegation section while preserving all surrounding user instructions, and leaves normal config/authentication untouched. Running it again does not duplicate the section. It refuses malformed or duplicate delegation markers before changing files, and it checks for every bundle file before writing anything. No Codex installer, login, key copy, pip install, or normal configuration rewrite occurs, and authentication stores are never inspected. After installing, run `codex_ds` and give it ordinary tasks.
 
 For private migration, create an archive from the committed files (never archive the entire Codex home). The checked-in config contains no machine-specific project trust entries, and archive ownership/timestamps are stripped:
 
 ```bash
-tar --format=ustar --owner=0 --group=0 --numeric-owner --mtime=@0 -czf ~/flash-agent-setup.tar.gz -C ~/.codex-ds config.toml models.json AGENTS.md flash-agent astra-delegation.md install.py test_flash_agent.py test_model_picker.py test_flash_sandbox.py smoke-test.py README.md codex-flash-worker.apparmor codex_ds model-picker.py
+tar --format=ustar --owner=0 --group=0 --numeric-owner --mtime=@0 -czf ~/flash-agent-setup.tar.gz -C ~/.codex-ds config.toml models.json AGENTS.md flash-agent astra-delegation.md install.py test_flash_agent.py test_flash_sandbox.py smoke-test.py README.md codex-flash-worker.apparmor codex_ds
 ```
 
 Include only those setup files in a migration archive, with no authentication, runtime logs, API keys, normal Codex settings, or local project trust entries. The manual command above includes your current worker config, so review it before publishing a newly generated archive.
