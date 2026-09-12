@@ -26,3 +26,6 @@ DEEPSEEK_API_KEY = "exclude"
 
 [sandbox_workspace_write]
 network_access = true
+
+[projects."/home/thodoris-evangelakos/.codex-ds"]
+trust_level = "trusted"
