@@ -59,11 +59,13 @@ codex_ds --model=deepseek-flash exec "Your task here"
 
 The direct route accepts native `--model`/`-m` spellings and forwards arguments literally; text after `--` cannot change providers. DeepSeek uses its Responses API, compatible reasoning settings, and the existing model catalog. Hosted web search is disabled for DeepSeek. The launcher preserves your approval and sandbox settings; `--yolo` affects the supervisor only, while Flash workers keep their own explicit sandbox.
 
-The standing policy in `~/.codex/AGENTS.md` directs supervisors to delegate before broad repository reading, giving Flash complete bounded reproduce-diagnose-fix-test jobs and small features with explicit acceptance criteria. When independent useful work exists, use two or three workers with disjoint owned files or separate worktrees. Workers report changed files, evidence, commands and exit outcomes, and unresolved issues. The supervisor owns intent, architecture, integration, and final judgment, reviewing critical evidence without repeating the entire investigation. Tiny tasks can stay local.
+The standing policy in `~/.codex/AGENTS.md` applies only to supervisors launched through `codex_ds`. It directs those supervisors to delegate before broad repository reading, giving Flash complete bounded reproduce-diagnose-fix-test jobs and small features with explicit acceptance criteria. When independent useful work exists, use two or three workers with disjoint owned files or separate worktrees. Workers report changed files, evidence, commands and exit outcomes, and unresolved issues. The supervisor owns intent, architecture, integration, and final judgment, reviewing critical evidence without repeating the entire investigation. Tiny tasks can stay local.
 
-`flash-agent` runs ephemeral workers in `~/.codex-ds`; Codex's native `spawn_agent` is not redirected to DeepSeek. Plain `codex` also loads the global delegation policy. Export `DEEPSEEK_API_KEY` before starting the supervisor; an already-running app does not inherit a later export. Missing credentials are reported explicitly. Start a new `codex_ds` process after installing launcher or policy updates.
+`flash-agent` runs ephemeral workers in `~/.codex-ds`; Codex's native `spawn_agent` is not redirected to DeepSeek. `codex_ds` exports `CODEX_DS_SUPERVISOR=1` for both GPT and DeepSeek supervisors. Plain `codex`, the app, and editor sessions ignore the delegation policy, and `flash-agent` refuses launches without that marker (exit 2), even if the API key is exported. Workers receive no supervisor marker and cannot spawn further workers. Export `DEEPSEEK_API_KEY` before starting `codex_ds`. Start new sessions after installing launcher or policy updates.
 
 ## Run workers
+
+These commands are for shell tools inside a `codex_ds` supervisor session:
 
 ```bash
 flash-agent --read-only "Inspect the repository and identify every file involved in authentication. Report findings only."
@@ -99,6 +101,7 @@ Pass: the supervisor launches `flash-agent --read-only` before doing most of the
 ```bash
 python3 ~/.codex-ds/test_flash_agent.py
 python3 ~/.codex-ds/test_flash_sandbox.py
+# Run live checks through a codex_ds supervisor's shell tools:
 python3 ~/.codex-ds/smoke-test.py
 python3 ~/.codex-ds/smoke-test.py --workspace-write
 ```
@@ -146,7 +149,7 @@ aa-exec -p codex-flash-worker -- python3 ~/.codex-ds/smoke-test.py
 aa-exec -p codex-flash-worker -- flash-agent --read-only "Inspect the repository. Report findings only."
 ```
 
-For automatic delegation, start your normal supervisor from the key-exported terminal. The worker launcher enters the loaded profile automatically; normal Codex authentication/configuration is unchanged. An already-running desktop supervisor still needs restarting from an environment containing the exported key. If the profile does not resolve a sandbox error on another host, retain the failed output for administrator diagnosis; do not disable the sandbox.
+For automatic delegation, start `codex_ds` from the key-exported terminal. The worker launcher enters the loaded profile automatically; normal Codex authentication/configuration is unchanged. Ordinary Codex sessions do not enable DeepSeek workers. If the profile does not resolve a sandbox error on another host, retain the failed output for administrator diagnosis; do not disable the sandbox.
 
 To remove this optional system policy, first stop processes launched in the profile, then run `sudo apparmor_parser -R /etc/apparmor.d/codex-flash-worker` and `sudo rm /etc/apparmor.d/codex-flash-worker`.
 

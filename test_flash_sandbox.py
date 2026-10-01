@@ -45,7 +45,7 @@ print("PASS:", sys.argv[1], "workspace access and outside-workspace write denial
         runner + ["codex", "sandbox", "-P", ":read-only", "-C", str(workspace),
                   "--", "bash", str(Path(__file__).with_name("flash-agent")),
                   "--read-only", "This preflight must fail before starting a worker."],
-        env=dict(env, DEEPSEEK_API_KEY="offline-placeholder"),
+        env=dict(env, DEEPSEEK_API_KEY="offline-placeholder", CODEX_DS_SUPERVISOR="1"),
         capture_output=True, text=True, timeout=30,
     )
     assert blocked.returncode == 73, blocked.stderr

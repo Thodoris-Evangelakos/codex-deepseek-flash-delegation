@@ -44,6 +44,9 @@ if command -v aa-exec >/dev/null && aa-exec -p codex-flash-worker -- /usr/bin/tr
     runner=(aa-exec -p codex-flash-worker --)
 fi
 
+# Only this launcher's supervisor sessions may start DeepSeek workers.
+export CODEX_DS_SUPERVISOR=1
+
 if [[ $deepseek == true ]]; then
     if [[ -z ${DEEPSEEK_API_KEY:-} ]]; then
         printf '%s\n' \

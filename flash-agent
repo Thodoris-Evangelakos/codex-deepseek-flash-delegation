@@ -24,6 +24,10 @@ while (($#)); do
     esac
 done
 if (($# != 1)) || [[ -z "$1" ]]; then usage >&2; exit 2; fi
+if [[ ${CODEX_DS_SUPERVISOR:-} != 1 ]]; then
+    printf '%s\n' 'flash-agent: workers are only enabled in codex_ds supervisor sessions; plain Codex cannot start them.' >&2
+    exit 2
+fi
 if [[ -z "${DEEPSEEK_API_KEY:-}" ]]; then
     printf '%s\n' 'flash-agent: DEEPSEEK_API_KEY is not exported; enter it securely in your shell first.' >&2
     exit 2
@@ -55,7 +59,7 @@ stop_worker() {
     exit "$1"
 }
 
-env -u CODEX_API_KEY -u OPENAI_API_KEY -u OPENAI_BASE_URL \
+env -u CODEX_API_KEY -u OPENAI_API_KEY -u OPENAI_BASE_URL -u CODEX_DS_SUPERVISOR \
     CODEX_HOME="$HOME/.codex-ds" \
     "${runner[@]}" codex --strict-config --ask-for-approval never exec \
     --ephemeral --skip-git-repo-check --color never --sandbox "$sandbox" \

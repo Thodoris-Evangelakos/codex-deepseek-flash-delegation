@@ -36,6 +36,7 @@ else:
     print(json.dumps({"args": sys.argv[1:], "cwd": os.getcwd(),
                       "stdin": sys.stdin.read() if sys.argv[-1:] == ["-"] else None,
                       "codex_home": os.environ.get("CODEX_HOME"),
+                      "ds_supervisor": os.environ.get("CODEX_DS_SUPERVISOR"),
                       "apparmor": os.environ.get("FLASH_TEST_APPARMOR") == "1",
                       "openai_key_present": "OPENAI_API_KEY" in os.environ,
                       "codex_key_present": "CODEX_API_KEY" in os.environ,
@@ -66,6 +67,16 @@ os.execv("/usr/bin/cp", ["cp", *sys.argv[1:]])
     env = dict(os.environ, PATH=str(temp) + os.pathsep + os.environ["PATH"],
                DEEPSEEK_API_KEY="test-only-placeholder", OPENAI_API_KEY="test-openai",
                CODEX_API_KEY="test-codex")
+    # Plain Codex must not start workers, even when its shell has the API key.
+    calls = temp / "plain-codex-worker-calls"
+    plain_env = dict(env, FLASH_STUB_CALLS=str(calls))
+    plain_env.pop("CODEX_DS_SUPERVISOR", None)
+    blocked = subprocess.run(["bash", str(root / "flash-agent"), "Task"],
+                             env=plain_env, capture_output=True, text=True)
+    assert blocked.returncode == 2, blocked
+    assert "codex_ds" in blocked.stderr and not blocked.stdout
+    assert not calls.exists()
+    env["CODEX_DS_SUPERVISOR"] = "1"
     task = "Inspect literal $(touch SHOULD_NOT_EXIST) `touch ALSO_NOT_EXIST`\nReport only."
     result = subprocess.run(["bash", str(root / "flash-agent"), "--read-only", "--json",
                              "--output", "report with spaces.txt", task],
@@ -83,6 +94,7 @@ os.execv("/usr/bin/cp", ["cp", *sys.argv[1:]])
     assert 'model_provider="deepseek"' in args
     assert 'model_providers.deepseek.base_url="https://api.deepseek.com/"' in args
     assert data["codex_home"] == str(Path.home() / ".codex-ds")
+    assert data["ds_supervisor"] is None
     assert data["cwd"] == str(temp) and data["key_present"]
     assert data["apparmor"]
     assert not data["openai_key_present"] and not data["codex_key_present"]
@@ -182,6 +194,7 @@ os.execv("/usr/bin/cp", ["cp", *sys.argv[1:]])
                              capture_output=True, text=True)
     assert missing.returncode == 2 and "not exported" in missing.stderr
     assert not missing.stdout
+    env.pop("CODEX_DS_SUPERVISOR")
 
     # Supervisor retains the normal home/auth, while worker tests above prove isolation.
     native_args = ["--yolo", "exec", "--json", "--", task]
@@ -191,6 +204,7 @@ os.execv("/usr/bin/cp", ["cp", *sys.argv[1:]])
     native_data = json.loads(native.stdout)
     assert native_data["args"] == native_args and native_data["cwd"] == str(temp)
     assert native_data["codex_home"] == str(Path.home() / ".codex")
+    assert native_data["ds_supervisor"] == "1"
     assert native_data["apparmor"] and native_data["openai_key_present"]
     assert native_data["codex_key_present"]
     env["DEEPSEEK_API_KEY"] = "test-only-placeholder"
@@ -234,6 +248,7 @@ os.execv("/usr/bin/cp", ["cp", *sys.argv[1:]])
         routed_data = json.loads(routed.stdout)
         assert routed_data["args"] == ds_args + arguments, routed_data["args"]
         assert routed_data["codex_home"] == ds_home
+        assert routed_data["ds_supervisor"] == "1"
         assert routed_data["key_present"] and not routed_data["openai_key_present"]
         assert not routed_data["codex_key_present"] and routed_data["apparmor"]
     assert not (temp / "SHOULD_NOT_EXIST").exists() and not (temp / "ALSO_NOT_EXIST").exists()
@@ -380,6 +395,7 @@ os.execv("/usr/bin/cp", ["cp", *sys.argv[1:]])
     assert installed.returncode == 17, installed.stderr
     installed_data = json.loads(installed.stdout)
     assert installed_data["codex_home"] == str(target / ".codex")
+    assert installed_data["ds_supervisor"] == "1"
     assert installed_data["args"][-2:] == ["--model", "deepseek-flash"]
     assert f'model_catalog_json="{target}/.codex-ds/models.json"' in installed_data["args"]
     assert 'model_provider="deepseek"' in installed_data["args"]
